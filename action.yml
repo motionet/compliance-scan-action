@@ -50,6 +50,9 @@ outputs:
   sarif-file:
     description: "Absolute path to the written SARIF file"
     value: ${{ steps.scan.outputs.sarif-file }}
+  action-exit-code:
+    description: "Exit code of the scan script: 0 (pass), 1 (severity gate), 2 (error/quota/timeout)"
+    value: ${{ steps.scan.outputs.action-exit-code }}
 
 runs:
   using: "composite"

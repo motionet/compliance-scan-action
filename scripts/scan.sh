@@ -28,6 +28,8 @@ log_error() { echo "::error::${*}"; }
 
 die() {
   log_error "${*}"
+  # Emit exit code to GITHUB_OUTPUT so callers can assert exit-2 vs exit-1
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "action-exit-code=2" >> "${GITHUB_OUTPUT}" || true
   exit 2
 }
 
@@ -338,6 +340,7 @@ FAIL_RANK=$(severity_rank "${FAIL_ON_SEVERITY}")
 
 if [[ ${FAIL_RANK} -eq 0 ]]; then
   log_info "Severity gate: none — scan passes regardless of findings."
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "action-exit-code=0" >> "${GITHUB_OUTPUT}" || true
   exit 0
 fi
 
@@ -361,8 +364,10 @@ fi
 if [[ ${BLOCKING_COUNT} -gt 0 ]]; then
   log_error "Severity gate breached: ${BLOCKING_COUNT} finding(s) at or above '${FAIL_ON_SEVERITY}' severity. Scan ID: ${SCAN_ID}"
   log_error "Review findings in ${SARIF_OUTPUT} or at ${API_URL}/scans/${SCAN_ID}"
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "action-exit-code=1" >> "${GITHUB_OUTPUT}" || true
   exit 1
 fi
 
 log_info "Severity gate passed: no findings at or above '${FAIL_ON_SEVERITY}'."
+[[ -n "${GITHUB_OUTPUT:-}" ]] && echo "action-exit-code=0" >> "${GITHUB_OUTPUT}" || true
 exit 0

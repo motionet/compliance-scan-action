@@ -380,8 +380,11 @@ jobs:
       - name: Verify exit 2 on 429
         run: |
           OUTCOME="${{ steps.rate-limit-test.outcome }}"
-          echo "Step outcome: ${OUTCOME}"
-          [[ "${OUTCOME}" == "failure" ]] || (echo "FAIL: expected step to fail (exit 2) on HTTP 429 but outcome was '${OUTCOME}'" && exit 1)
+          EXIT_CODE="${{ steps.rate-limit-test.outputs.action-exit-code }}"
+          echo "Step outcome:    ${OUTCOME}"
+          echo "action-exit-code: ${EXIT_CODE}"
+          [[ "${OUTCOME}" == "failure" ]] || (echo "FAIL: expected step to fail on HTTP 429 but outcome was '${OUTCOME}'" && exit 1)
+          [[ "${EXIT_CODE}" == "2" ]] || (echo "FAIL: expected action-exit-code=2 (error) but got '${EXIT_CODE}'" && exit 1)
           echo "✅ HTTP 429 correctly triggers exit 2"
 
   test-poll-failed:
@@ -444,8 +447,11 @@ jobs:
       - name: Verify exit 2 on status=failed
         run: |
           OUTCOME="${{ steps.poll-failed-test.outcome }}"
-          echo "Step outcome: ${OUTCOME}"
-          [[ "${OUTCOME}" == "failure" ]] || (echo "FAIL: expected step to fail (exit 2) when scan status=failed but outcome was '${OUTCOME}'" && exit 1)
+          EXIT_CODE="${{ steps.poll-failed-test.outputs.action-exit-code }}"
+          echo "Step outcome:    ${OUTCOME}"
+          echo "action-exit-code: ${EXIT_CODE}"
+          [[ "${OUTCOME}" == "failure" ]] || (echo "FAIL: expected step to fail when scan status=failed but outcome was '${OUTCOME}'" && exit 1)
+          [[ "${EXIT_CODE}" == "2" ]] || (echo "FAIL: expected action-exit-code=2 (error) but got '${EXIT_CODE}'" && exit 1)
           echo "✅ status=failed correctly triggers exit 2"
 
   test-staging:
