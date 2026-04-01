@@ -1,0 +1,103 @@
+name: "Motionet Compliance Scan"
+description: "Scan your project for EU AI Act and other regulatory compliance using the Motionet Compliance API"
+author: "Motionet AG"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  api-key:
+    description: "Motionet API key (X-API-Key)"
+    required: true
+  api-url:
+    description: "Motionet Compliance API base URL"
+    required: false
+    default: "https://compliance-api.motionet.io"
+  regulations:
+    description: "Comma-separated list of regulation IDs to scan against"
+    required: false
+    default: "EU_AI_ACT"
+  min-severity:
+    description: "Minimum severity level to include in output (info, low, medium, high, critical)"
+    required: false
+    default: "info"
+  fail-on-severity:
+    description: "Severity threshold that fails the check run (none, info, low, medium, high, critical)"
+    required: false
+    default: "none"
+  sarif-output:
+    description: "Path to write SARIF output file (relative to workspace or absolute)"
+    required: false
+    default: "compliance-results.sarif"
+
+outputs:
+  compliance-score:
+    description: "Overall compliance score (0-100)"
+    value: ${{ steps.scan.outputs.compliance-score }}
+  findings-count:
+    description: "Total number of findings"
+    value: ${{ steps.scan.outputs.findings-count }}
+  critical-count:
+    description: "Number of critical findings"
+    value: ${{ steps.scan.outputs.critical-count }}
+  high-count:
+    description: "Number of high severity findings"
+    value: ${{ steps.scan.outputs.high-count }}
+  scan-id:
+    description: "Scan UUID for follow-up API calls"
+    value: ${{ steps.scan.outputs.scan-id }}
+  sarif-file:
+    description: "Absolute path to the written SARIF file"
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Package project
+      id: package
+      shell: bash
+      run: |
+        set -euo pipefail
+        TARBALL=/tmp/compliance-project-${{ github.run_id }}-${{ github.run_attempt }}.tar.gz
+        echo "Creating project tarball at ${TARBALL} ..."
+        tar czf "${TARBALL}" \
+          --exclude='.git' \
+          --exclude='node_modules' \
+          --exclude='__pycache__' \
+          --exclude='.env' \
+          --exclude='*.pyc' \
+          --exclude='.venv' \
+          --exclude='venv' \
+          --exclude='dist' \
+          --exclude='build' \
+          --exclude='.tox' \
+          -C "${{ github.workspace }}" \
+          .
+        TARBALL_SIZE=$(du -sh "${TARBALL}" | cut -f1)
+        echo "tarball=${TARBALL}" >> "$GITHUB_OUTPUT"
+        echo "✅ Tarball created: ${TARBALL} (${TARBALL_SIZE})"
+
+    - name: Submit and poll scan
+      id: scan
+      shell: bash
+      env:
+        MOTIONET_API_KEY: ${{ inputs.api-key }}
+        MOTIONET_API_URL: ${{ inputs.api-url }}
+        MOTIONET_REGULATIONS: ${{ inputs.regulations }}
+        MOTIONET_MIN_SEVERITY: ${{ inputs.min-severity }}
+        MOTIONET_FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
+        MOTIONET_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+        MOTIONET_TARBALL: ${{ steps.package.outputs.tarball }}
+      run: |
+        bash "${{ github.action_path }}/scripts/scan.sh"
+
+    - name: Clean up tarball
+      if: always()
+      shell: bash
+      run: |
+        TARBALL="${{ steps.package.outputs.tarball }}"
+        if [ -f "${TARBALL}" ]; then
+          rm -f "${TARBALL}"
+          echo "🧹 Cleaned up tarball"
+        fi

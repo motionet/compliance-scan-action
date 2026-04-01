@@ -1,0 +1,363 @@
+name: Self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      api-url:
+        description: "API URL to test against"
+        required: false
+        default: "https://compliance-api.motionet.io"
+
+jobs:
+  test-mock:
+    name: Test (mock API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock API server
+        id: mock-server
+        run: |
+          python3 -c "
+          import http.server
+          import json
+          import threading
+          import time
+          import sys
+          import os
+          import signal
+
+          SCAN_RESPONSE = {
+            'id': 'test-scan-uuid-1234',
+            'status': 'completed',
+            'complianceScore': 82,
+            'findingsCount': 3,
+            'criticalCount': 0,
+            'highCount': 1,
+            'sarifReport': {
+              '\$schema': 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+              'version': '2.1.0',
+              'runs': [{
+                'tool': {'driver': {'name': 'Motionet Compliance Scanner', 'version': '1.0.0', 'rules': []}},
+                'results': [{
+                  'ruleId': 'EU_AI_ACT_ART_13_TRANSPARENCY',
+                  'level': 'error',
+                  'message': {'text': 'Missing AI system transparency documentation'},
+                  'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'README.md', 'uriBaseId': '%SRCROOT%'}, 'region': {'startLine': 1}}}]
+                }]
+              }]
+            },
+            'findings': [
+              {'checkId': 'EU_AI_ACT_ART_13_TRANSPARENCY', 'severity': 'high', 'message': 'Missing AI system transparency documentation', 'evidence': {'file': 'README.md', 'line': 1}},
+              {'checkId': 'EU_AI_ACT_ART_9_RISK_MGMT', 'severity': 'medium', 'message': 'No risk management documentation found', 'evidence': {'file': 'docs/', 'line': 1}},
+              {'checkId': 'EU_AI_ACT_ART_12_RECORD_KEEPING', 'severity': 'low', 'message': 'No audit trail logging detected', 'evidence': {'file': 'src/', 'line': 1}}
+            ]
+          }
+
+          ASYNC_SCAN_RESPONSE = {
+            'id': 'test-scan-async-5678',
+            'status': 'pending',
+            'pollUrl': '/api/v2/scans/test-scan-async-5678'
+          }
+
+          request_count = [0]
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+              pass
+
+            def do_POST(self):
+              if self.path == '/api/v2/scans':
+                body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                request_count[0] += 1
+                print(f'[mock] POST /api/v2/scans — Content-Type: {self.headers.get(\"Content-Type\", \"\")} body_size={len(body)}', flush=True)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(SCAN_RESPONSE).encode())
+              else:
+                self.send_response(404)
+                self.end_headers()
+
+            def do_GET(self):
+              if self.path.startswith('/api/v2/scans/'):
+                scan_id = self.path.split('/')[-1]
+                print(f'[mock] GET /api/v2/scans/{scan_id}', flush=True)
+                response = dict(SCAN_RESPONSE)
+                response['id'] = scan_id
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode())
+              else:
+                self.send_response(404)
+                self.end_headers()
+
+          server = http.server.HTTPServer(('127.0.0.1', 18080), Handler)
+          print('[mock] Server listening on http://127.0.0.1:18080', flush=True)
+          thread = threading.Thread(target=server.serve_forever)
+          thread.daemon = True
+          thread.start()
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write('mock-pid=' + str(os.getpid()) + '\n')
+
+          time.sleep(300)
+          " &
+          echo "mock-pid=$!" >> "$GITHUB_OUTPUT"
+          sleep 1
+          echo "Mock server started (PID: $!)"
+
+      - name: Run compliance scan (mock API)
+        id: compliance
+        uses: ./
+        with:
+          api-key: "test-api-key-mock"
+          api-url: "http://127.0.0.1:18080"
+          regulations: "EU_AI_ACT"
+          min-severity: "info"
+          fail-on-severity: "none"
+          sarif-output: "compliance-results.sarif"
+
+      - name: Verify outputs
+        run: |
+          echo "=== Action Outputs ==="
+          echo "scan-id:          ${{ steps.compliance.outputs.scan-id }}"
+          echo "compliance-score: ${{ steps.compliance.outputs.compliance-score }}"
+          echo "findings-count:   ${{ steps.compliance.outputs.findings-count }}"
+          echo "critical-count:   ${{ steps.compliance.outputs.critical-count }}"
+          echo "high-count:       ${{ steps.compliance.outputs.high-count }}"
+          echo "sarif-file:       ${{ steps.compliance.outputs.sarif-file }}"
+
+          [[ "${{ steps.compliance.outputs.scan-id }}" != "" ]]         || (echo "FAIL: scan-id is empty" && exit 1)
+          [[ "${{ steps.compliance.outputs.compliance-score }}" != "" ]] || (echo "FAIL: compliance-score is empty" && exit 1)
+
+          echo "✅ Outputs look correct"
+
+      - name: Verify SARIF file
+        run: |
+          SARIF_FILE="${{ steps.compliance.outputs.sarif-file }}"
+          echo "Checking SARIF at: ${SARIF_FILE}"
+
+          [[ -f "${SARIF_FILE}" ]] || (echo "FAIL: SARIF file not found at ${SARIF_FILE}" && exit 1)
+
+          VERSION=$(jq -r '.version' "${SARIF_FILE}")
+          [[ "${VERSION}" == "2.1.0" ]] || (echo "FAIL: SARIF version is '${VERSION}', expected '2.1.0'" && exit 1)
+
+          RESULT_COUNT=$(jq '.runs[0].results | length' "${SARIF_FILE}")
+          echo "SARIF result count: ${RESULT_COUNT}"
+
+          echo "✅ SARIF file is valid SARIF 2.1.0"
+          echo ""
+          echo "=== SARIF contents ==="
+          jq '.' "${SARIF_FILE}"
+
+      - name: Stop mock server
+        if: always()
+        run: |
+          PID="${{ steps.mock-server.outputs.mock-pid }}"
+          if [ -n "${PID}" ]; then
+            kill "${PID}" 2>/dev/null || true
+          fi
+
+  test-severity-gate-pass:
+    name: Test severity gate (no blocking findings → exit 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock API (no critical findings)
+        run: |
+          python3 -c "
+          import http.server, json, threading, time, os
+
+          SCAN_RESPONSE = {
+            'id': 'test-gate-pass',
+            'status': 'completed',
+            'complianceScore': 95,
+            'findingsCount': 1,
+            'criticalCount': 0,
+            'highCount': 0,
+            'findings': [
+              {'checkId': 'EU_AI_ACT_ART_12_RECORD_KEEPING', 'severity': 'low', 'message': 'Minor finding', 'evidence': {'file': 'src/', 'line': 1}}
+            ]
+          }
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args): pass
+            def do_POST(self):
+              self.rfile.read(int(self.headers.get('Content-Length', 0)))
+              self.send_response(200)
+              self.send_header('Content-Type', 'application/json')
+              self.end_headers()
+              self.wfile.write(json.dumps(SCAN_RESPONSE).encode())
+
+          server = http.server.HTTPServer(('127.0.0.1', 18081), Handler)
+          thread = threading.Thread(target=server.serve_forever)
+          thread.daemon = True
+          thread.start()
+          time.sleep(300)
+          " &
+          sleep 1
+
+      - name: Run scan with fail-on-severity=high (no high findings → should pass)
+        uses: ./
+        with:
+          api-key: "test-key"
+          api-url: "http://127.0.0.1:18081"
+          fail-on-severity: "high"
+
+  test-severity-gate-fail:
+    name: Test severity gate (high finding + fail-on-severity=high → exit 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock API (high findings present)
+        run: |
+          python3 -c "
+          import http.server, json, threading, time, os
+
+          SCAN_RESPONSE = {
+            'id': 'test-gate-fail',
+            'status': 'completed',
+            'complianceScore': 60,
+            'findingsCount': 2,
+            'criticalCount': 0,
+            'highCount': 1,
+            'findings': [
+              {'checkId': 'EU_AI_ACT_ART_13_TRANSPARENCY', 'severity': 'high', 'message': 'Missing transparency docs', 'evidence': {'file': 'README.md', 'line': 1}},
+              {'checkId': 'EU_AI_ACT_ART_12_RECORD_KEEPING', 'severity': 'low', 'message': 'Minor finding', 'evidence': {'file': 'src/', 'line': 1}}
+            ]
+          }
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args): pass
+            def do_POST(self):
+              self.rfile.read(int(self.headers.get('Content-Length', 0)))
+              self.send_response(200)
+              self.send_header('Content-Type', 'application/json')
+              self.end_headers()
+              self.wfile.write(json.dumps(SCAN_RESPONSE).encode())
+
+          server = http.server.HTTPServer(('127.0.0.1', 18082), Handler)
+          thread = threading.Thread(target=server.serve_forever)
+          thread.daemon = True
+          thread.start()
+          time.sleep(300)
+          " &
+          sleep 1
+
+      - name: Run scan (should exit 1 due to high finding)
+        id: gate-test
+        continue-on-error: true
+        uses: ./
+        with:
+          api-key: "test-key"
+          api-url: "http://127.0.0.1:18082"
+          fail-on-severity: "high"
+
+      - name: Verify exit 1
+        run: |
+          OUTCOME="${{ steps.gate-test.outcome }}"
+          echo "Step outcome: ${OUTCOME}"
+          [[ "${OUTCOME}" == "failure" ]] || (echo "FAIL: expected step to fail (exit 1) but outcome was '${OUTCOME}'" && exit 1)
+          echo "✅ Severity gate correctly triggered exit 1"
+
+  test-async-poll:
+    name: Test async polling (202 → poll → completed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start mock API (returns 202, then completes on poll)
+        run: |
+          python3 -c "
+          import http.server, json, threading, time, os
+
+          ASYNC_SUBMIT = {
+            'id': 'async-scan-9999',
+            'status': 'pending',
+            'pollUrl': '/api/v2/scans/async-scan-9999'
+          }
+
+          poll_count = [0]
+
+          COMPLETED = {
+            'id': 'async-scan-9999',
+            'status': 'completed',
+            'complianceScore': 88,
+            'findingsCount': 0,
+            'criticalCount': 0,
+            'highCount': 0,
+            'findings': []
+          }
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args): pass
+            def do_POST(self):
+              self.rfile.read(int(self.headers.get('Content-Length', 0)))
+              self.send_response(202)
+              self.send_header('Content-Type', 'application/json')
+              self.end_headers()
+              self.wfile.write(json.dumps(ASYNC_SUBMIT).encode())
+            def do_GET(self):
+              poll_count[0] += 1
+              print(f'[mock] Poll #{poll_count[0]}', flush=True)
+              if poll_count[0] < 3:
+                resp = {'id': 'async-scan-9999', 'status': 'pending'}
+              else:
+                resp = COMPLETED
+              self.send_response(200)
+              self.send_header('Content-Type', 'application/json')
+              self.end_headers()
+              self.wfile.write(json.dumps(resp).encode())
+
+          server = http.server.HTTPServer(('127.0.0.1', 18083), Handler)
+          thread = threading.Thread(target=server.serve_forever)
+          thread.daemon = True
+          thread.start()
+          time.sleep(300)
+          " &
+          sleep 1
+
+      - name: Run scan (async, should poll and complete)
+        id: async-scan
+        uses: ./
+        with:
+          api-key: "test-key"
+          api-url: "http://127.0.0.1:18083"
+          fail-on-severity: "none"
+
+      - name: Verify async scan result
+        run: |
+          echo "scan-id: ${{ steps.async-scan.outputs.scan-id }}"
+          echo "score:   ${{ steps.async-scan.outputs.compliance-score }}"
+          [[ "${{ steps.async-scan.outputs.scan-id }}" == "async-scan-9999" ]] || (echo "FAIL: unexpected scan-id" && exit 1)
+          echo "✅ Async polling worked correctly"
+
+  test-staging:
+    name: Test against staging API
+    runs-on: ubuntu-latest
+    if: ${{ vars.MOTIONET_STAGING_API_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run compliance scan (staging)
+        id: compliance
+        uses: ./
+        with:
+          api-key: ${{ secrets.MOTIONET_STAGING_API_KEY }}
+          api-url: ${{ vars.MOTIONET_STAGING_API_URL }}
+          regulations: EU_AI_ACT
+          fail-on-severity: none
+
+      - name: Verify staging results
+        run: |
+          echo "scan-id: ${{ steps.compliance.outputs.scan-id }}"
+          echo "score:   ${{ steps.compliance.outputs.compliance-score }}"
+          [[ "${{ steps.compliance.outputs.scan-id }}" != "" ]] || (echo "FAIL: no scan-id from staging" && exit 1)
+          echo "✅ Staging test passed"
