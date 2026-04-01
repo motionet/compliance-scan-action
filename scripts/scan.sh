@@ -297,9 +297,11 @@ if [[ -z "${SARIF_CONTENT}" ]]; then
 fi
 
 # Ensure parent directory exists
-mkdir -p "$(dirname "${SARIF_OUTPUT}")"
+mkdir -p "$(dirname "${SARIF_OUTPUT}")" \
+  || die "Failed to create SARIF output directory: $(dirname "${SARIF_OUTPUT}")"
 
-echo "${SARIF_CONTENT}" > "${SARIF_OUTPUT}"
+echo "${SARIF_CONTENT}" > "${SARIF_OUTPUT}" \
+  || die "Failed to write SARIF to ${SARIF_OUTPUT} — check disk space and write permissions"
 log_info "SARIF written to ${SARIF_OUTPUT}"
 
 # ---------------------------------------------------------------------------
@@ -313,7 +315,8 @@ log_info "SARIF written to ${SARIF_OUTPUT}"
   echo "high-count=${HIGH_COUNT}"
   echo "scan-id=${SCAN_ID}"
   echo "sarif-file=${SARIF_OUTPUT}"
-} >> "${GITHUB_OUTPUT}"
+} >> "${GITHUB_OUTPUT}" \
+  || die "Failed to write to GITHUB_OUTPUT — GITHUB_OUTPUT env var may be unset or the file is not writable"
 
 # ---------------------------------------------------------------------------
 # Step 6: Evaluate severity gate
